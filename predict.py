@@ -33,17 +33,20 @@ if __name__ == "__main__":
 
     for ont in args.ontology:
         predictor = Predictor(models[ont], gcn=gcn)
-        if args.seq is not None:
+
+        if args.seq is not None and args.pdb_fn is not None:
+            predictor.predict_from_pdb_and_seq(args.pdb_fn, args.seq)
+        elif args.seq is not None:
             predictor.predict(args.seq)
-        if args.cmap is not None:
+        elif args.cmap is not None:
             predictor.predict(args.cmap)
-        if args.pdb_fn is not None:
+        elif args.pdb_fn is not None:
             predictor.predict(args.pdb_fn)
-        if args.fasta_fn is not None:
+        elif args.fasta_fn is not None:
             predictor.predict_from_fasta(args.fasta_fn)
-        if args.cmap_csv is not None:
+        elif args.cmap_csv is not None:
             predictor.predict_from_catalogue(args.cmap_csv)
-        if args.pdb_dir is not None:
+        elif args.pdb_dir is not None:
             predictor.predict_from_PDB_dir(args.pdb_dir)
 
         # save predictions

@@ -130,6 +130,30 @@ class Predictor(object):
                 self.goidx2chains[idx].add(chain)
                 self.prot2goterms[chain].append((self.goterms[idx], self.gonames[idx], float(y[idx])))
 
+    def predict_from_pdb_and_seq(self, pdb_fn, seq, cmap_thresh=10.0, chain='query_prot'):
+        print("### Computing predictions using sequence and separate PDB file...")
+        self.Y_hat = np.zeros((1, len(self.goterms)), dtype=float)
+        self.goidx2chains = {}
+        self.prot2goterms = {}
+        self.data = {}
+        self.test_prot_list = [chain]
+
+        # Process the sequence and the structure
+        S = seq2onehot(str(seq))
+        S = S.reshape(1, *S.shape)
+        A, _, seqres = self._load_cmap(pdb_fn, cmap_thresh=cmap_thresh)
+        
+        y = self.model([A, S], training=False).numpy()[:, :, 0].reshape(-1)
+        self.Y_hat[0] = y
+        self.prot2goterms[chain] = []
+        self.data[chain] = [[A, S], seqres]
+        go_idx = np.where((y >= self.thresh) == True)[0]
+        for idx in go_idx:
+            if idx not in self.goidx2chains:
+                self.goidx2chains[idx] = set()
+                self.goidx2chains[idx].add(chain)
+                self.prot2goterms[chain].append((self.goterms[idx], self.gonames[idx], float(y[idx])))
+
     def predict_from_PDB_dir(self, dir_name, cmap_thresh=10.0):
         print ("### Computing predictions from directory with PDB files...")
         pdb_fn_list = glob.glob(dir_name + '/*.pdb*')
