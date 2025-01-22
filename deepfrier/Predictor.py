@@ -105,7 +105,6 @@ class Predictor(object):
         self.test_prot_list = [chain]
         if self.gcn:
             A, S, seqres = self._load_cmap(test_prot, cmap_thresh=cmap_thresh)
-
             y = self.model([A, S], training=False).numpy()[:, :, 0].reshape(-1)
             self.Y_hat[0] = y
             self.prot2goterms[chain] = []
@@ -142,7 +141,6 @@ class Predictor(object):
         S = seq2onehot(str(seq))
         S = S.reshape(1, *S.shape)
         A, _, seqres = self._load_cmap(pdb_fn, cmap_thresh=cmap_thresh)
-        
         y = self.model([A, S], training=False).numpy()[:, :, 0].reshape(-1)
         self.Y_hat[0] = y
         self.prot2goterms[chain] = []
@@ -151,12 +149,18 @@ class Predictor(object):
         for idx in go_idx:
             if idx not in self.goidx2chains:
                 self.goidx2chains[idx] = set()
-                self.goidx2chains[idx].add(chain)
-                self.prot2goterms[chain].append((self.goterms[idx], self.gonames[idx], float(y[idx])))
+            self.goidx2chains[idx].add(chain)
+            self.prot2goterms[chain].append((self.goterms[idx], self.gonames[idx], float(y[idx])))
 
-    def predict_from_PDB_dir(self, dir_name, cmap_thresh=10.0):
-        print ("### Computing predictions from directory with PDB files...")
-        pdb_fn_list = glob.glob(dir_name + '/*.pdb*')
+    def predict_from_PDB_dir(self, dir_name, file_list=None, cmap_thresh=10.0):
+        print("### Computing predictions from directory with PDB files...")
+        if file_list:
+            # If a file_list is provided, use those files
+            pdb_fn_list = [os.path.join(dir_name, file) for file in file_list]
+        else:
+            # Otherwise, use all PDB files in the directory
+            pdb_fn_list = glob.glob(dir_name + '/*.pdb*')
+
         self.chain2path = {pdb_fn.split('/')[-1].split('.')[0]: pdb_fn for pdb_fn in pdb_fn_list}
         self.test_prot_list = list(self.chain2path.keys())
         self.Y_hat = np.zeros((len(self.test_prot_list), len(self.goterms)), dtype=float)

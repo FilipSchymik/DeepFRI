@@ -18,15 +18,18 @@ if __name__ == "__main__":
     parser.add_argument('-v', '--verbose', help="Prints predictions.", action="store_true")
     parser.add_argument('--use_guided_grads', help="Use guided grads to compute gradCAM.", action="store_true")
     parser.add_argument('--saliency', help="Compute saliency maps for every protein and every MF-GO term/EC number.", action="store_true")
+    parser.add_argument('--file_list', type=str, help='File containing a list of PDB files to process')
     args = parser.parse_args()
 
     with open(args.model_config) as json_file:
         params = json.load(json_file)
 
-    if args.seq is not None or args.fasta_fn is not None:
-        params = params['cnn']
-    elif args.cmap is not None or args.pdb_fn is not None or args.cmap_csv is not None or args.pdb_dir is not None:
+    
+    if args.cmap is not None or args.pdb_fn is not None or args.cmap_csv is not None or args.pdb_dir is not None:
         params = params['gcn']
+    elif args.seq is not None or args.fasta_fn is not None:
+        params = params['cnn']
+
     gcn = params['gcn']
     layer_name = params['layer_name']
     models = params['models']
@@ -46,6 +49,8 @@ if __name__ == "__main__":
             predictor.predict_from_fasta(args.fasta_fn)
         elif args.cmap_csv is not None:
             predictor.predict_from_catalogue(args.cmap_csv)
+        elif args.pdb_dir is not None and args.file_list is not None:
+            predictor.predict_from_PDB_dir(args.pdb_dir, args.file_list)
         elif args.pdb_dir is not None:
             predictor.predict_from_PDB_dir(args.pdb_dir)
 
