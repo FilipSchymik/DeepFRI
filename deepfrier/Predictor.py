@@ -11,7 +11,8 @@ import tensorflow as tf
 from Bio import pairwise2
 from .utils import load_catalogue, load_FASTA, load_predicted_PDB, seq2onehot
 from .layers import MultiGraphConv, GraphConv, FuncPredictor, SumPooling
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
 class GradCAM(object):
     """
@@ -97,6 +98,79 @@ class Predictor(object):
         A = A.reshape(1, *A.shape)
 
         return A, S, seq
+    
+    def process_pdb_group(self, pdb_fn, fasta_id_list, fasta_dict, cmap_thresh):
+        """Process one PDB group and return a tuple:
+        (predictions, prot2goterms, data) where each is a dictionary keyed by the FASTA ID.
+        """
+        results = {}
+        prot2goterms_local = {}
+        data_local = {}
+        try:
+            A, S_pdb, pdb_seq = self._load_cmap(pdb_fn, cmap_thresh=cmap_thresh)
+        except Exception as e:
+            print(f"Error processing file {pdb_fn}: {e}")
+            return results, prot2goterms_local, data_local
+
+        print(f"Processing PDB file: {pdb_fn} for {len(fasta_id_list)} sequences")
+        for fid in fasta_id_list:
+            fasta_seq = fasta_dict.get(fid)
+            if not fasta_seq:
+                print(f"FASTA ID {fid} not found in the provided FASTA!")
+                continue
+
+            # Align sequences
+            alignments = pairwise2.align.globalxx(fasta_seq, pdb_seq)
+            if not alignments:
+                print(f"Failed to align sequences for {fid} in {pdb_fn}")
+                continue
+            best = alignments[0]
+            aligned_fasta, aligned_pdb, score, start, end = best
+
+            # Determine aligned positions
+            fasta_indices = []
+            pdb_indices = []
+            i, j = 0, 0
+            for a_f, a_p in zip(aligned_fasta, aligned_pdb):
+                if a_f != '-' and a_p != '-':
+                    fasta_indices.append(i)
+                    pdb_indices.append(j)
+                if a_f != '-':
+                    i += 1
+                if a_p != '-':
+                    j += 1
+
+            if len(fasta_indices) == 0 or len(pdb_indices) == 0:
+                print(f"No overlapping residues for {fid} in {pdb_fn}")
+                continue
+
+            # Produce trimmed inputs
+            S_fasta = seq2onehot(fasta_seq)
+            S_trimmed = S_fasta[fasta_indices, :]
+            A_contact = A[0]
+            A_trimmed = A_contact[np.ix_(pdb_indices, pdb_indices)]
+            if S_trimmed.size == 0 or A_trimmed.size == 0:
+                print(f"Trimmed inputs are empty for {fid} in {pdb_fn}")
+                continue
+
+            # Reshape inputs to add the batch dimension
+            S_trimmed = S_trimmed.reshape(1, *S_trimmed.shape)
+            A_trimmed = A_trimmed.reshape(1, *A_trimmed.shape)
+
+            # Run model prediction
+            y = self.model([A_trimmed, S_trimmed], training=False).numpy()[:, :, 0].reshape(-1)
+            results[fid] = y
+
+            # Build the GO term details for CSV export
+            prot2goterms_local[fid] = []
+            go_idx = np.where(y >= self.thresh)[0]
+            for idx in go_idx:
+                prot2goterms_local[fid].append((self.goterms[idx], self.gonames[idx], float(y[idx])))
+
+            # Save additional data if needed (e.g. trimmed inputs, original sequence)
+            data_local[fid] = [[A_trimmed, S_trimmed], fasta_seq]
+
+        return results, prot2goterms_local, data_local
 
     def predict(self, test_prot, cmap_thresh=10.0, chain='query_prot'):
         print ("### Computing predictions on a single protein...")
@@ -212,95 +286,50 @@ class Predictor(object):
         # 1. Load FASTA sequences
         fasta_ids, fasta_seqs = load_FASTA(fasta_fn)
         fasta_dict = {fid.split()[0]: seq for fid, seq in zip(fasta_ids, fasta_seqs)}
-
+        
+        print("Mapping groups:")
         # 2. Load mapping
         mapping = {}
         with open(mapping_fn, 'r') as csvfile:
             reader = csv.reader(csvfile)
             for row in reader:
                 fid = os.path.splitext(row[0].strip())[0]
-                #Check if fasta id exists in the fasta dict
+                # Check if FASTA ID exists
                 if fid not in fasta_dict:
                     print(f"FASTA ID {fid} not found in {fasta_fn}!")
                     continue
                 pdb_file = row[1].strip()
-
                 if not pdb_file.lower().endswith('.pdb') and not pdb_file.lower().endswith('.pdb.gz'):
                     pdb_file += '.pdb'
-
                 if not os.path.isabs(pdb_file) and pdb_dir is not None:
                     pdb_file = os.path.join(pdb_dir, pdb_file)
-
                 mapping.setdefault(pdb_file, []).append(fid)
-
+        
+        for pdb_file, fid_list in mapping.items():
+            print(f"{pdb_file}: {fid_list}")
+        
         self.prot2goterms = {}
         self.data = {}
         self.goidx2chains = {}
         predictions = {}
 
-        # 3. Process PDB files
-        for pdb_fn, fasta_id_list in mapping.items():
-            try:
-                A, S_pdb, pdb_seq = self._load_cmap(pdb_fn, cmap_thresh=cmap_thresh)
-            except Exception as e:
-                print(f"Error processing file {pdb_fn}: {e}")
-                continue
-        
-        # 4. Map fasta to pdb file
-        print(f"Processing PDB file: {pdb_fn} for {len(fasta_id_list)} sequences")
-        for fid in fasta_id_list:
-            fasta_seq = fasta_dict.get(fid)
-            if not fasta_seq:
-                print(f"FASTA ID {fid} not found in {fasta_fn}!")
-                continue
-
-            # 5. Align sequences
-            alignments = pairwise2.align.globalxx(fasta_seq, pdb_seq)
-            if not alignments:
-                print(f"Failed to align sequences for {fid} in {pdb_fn}")
-                continue
-            best = alignments[0]
-            aligned_fasta, aligned_pdb, score, start, end = best
-
-            # 6. Determine position in the fasta sequence that align with pdb sequence
-            fasta_indices = []
-            pdb_indices = []
-            i, j = 0, 0
-            for a_f, a_p in zip(aligned_fasta, aligned_pdb):
-                if a_f != '-' and a_p != '-':
-                    fasta_indices.append(i)
-                    pdb_indices.append(j)
-                if a_f != '-':
-                    i += 1
-                if a_p != '-':
-                    j += 1
-
-            # 7. Produce trimmed inputs
-            S_fasta = seq2onehot(fasta_seq)
-            S_trimmed = S_fasta[fasta_indices, :]
-            A_contact = A[0]
-            A_trimmed = A_contact[np.ix_(pdb_indices, pdb_indices)]
-
-            # Reshape
-            S_trimmed = S_trimmed.reshape(1, *S_trimmed.shape)
-            A_trimmed = A_trimmed.reshape(1, *A_trimmed.shape)
-
-            # 8. Run model prediction
-            y = self.model([A_trimmed, S_trimmed], training=False).numpy()[:, :, 0].reshape(-1)
-
-            # 9. Store results
-            predictions[fid] = y
-            self.prot2goterms[fid] = []
-            go_idx = np.where(y >= self.thresh)[0]
-            for idx in go_idx:
-                if idx not in self.goidx2chains:
-                    self.goidx2chains[idx] = set()
-                self.goidx2chains[idx].add(fid)
-                self.prot2goterms[fid].append((self.goterms[idx], self.gonames[idx], float(y[idx])))
-            self.data[fid] = [[A_trimmed, S_trimmed], fasta_seq]
+        # 3. Process each mapping group in parallel with a progress bar
+        tasks = []
+        total_groups = len(mapping)
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            for pdb_fn, fasta_id_list in mapping.items():
+                tasks.append(executor.submit(self.process_pdb_group, pdb_fn, fasta_id_list, fasta_dict, cmap_thresh))
             
+            for future in tqdm(as_completed(tasks), total=total_groups, desc="Processing mapping groups"):
+                group_results, prot2goterms_local, data_local = future.result()
+                predictions.update(group_results)
+                self.prot2goterms.update(prot2goterms_local)
+                self.data.update(data_local)
+
+        # 4. Now that predictions are collected, update self.test_prot_list and self.Y_hat
         self.test_prot_list = list(predictions.keys())
         self.Y_hat = np.array([predictions[fid] for fid in self.test_prot_list])
+        print(f"Collected predictions for {len(self.test_prot_list)} proteins.")
 
     def predict_from_catalogue(self, catalogue_fn, cmap_thresh=10.0):
         print ("### Computing predictions from catalogue...")
@@ -347,13 +376,18 @@ class Predictor(object):
 
     def save_predictions(self, output_fn):
         print ("### Saving predictions to *.json file...")
-        # pickle.dump({'pdb_chains': self.test_prot_list, 'Y_hat': self.Y_hat, 'goterms': self.goterms, 'gonames': self.gonames}, open(output_fn, 'wb'))
+        out_data = {
+            'pdb_chains': self.test_prot_list,
+            'Y_hat': self.Y_hat.tolist(),
+            'goterms': self.goterms.tolist(),
+            'gonames': self.gonames.tolist()
+        }
+        
+        abs_path = os.path.abspath(output_fn)
+        print("Saving to file:", abs_path)
         with open(output_fn, 'w') as fw:
-            out_data = {'pdb_chains': self.test_prot_list,
-                        'Y_hat': self.Y_hat.tolist(),
-                        'goterms': self.goterms.tolist(),
-                        'gonames': self.gonames.tolist()}
             json.dump(out_data, fw, indent=1)
+        print("File saved.")
 
     def export_csv(self, output_fn, verbose):
         with open(output_fn, 'w') as csvFile:
