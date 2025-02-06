@@ -20,6 +20,7 @@ if __name__ == "__main__":
     parser.add_argument('--saliency', help="Compute saliency maps for every protein and every MF-GO term/EC number.", action="store_true")
     # New argument to supply a list of files to process (one file name per line) -Filip
     parser.add_argument('--file_list', type=str, help='File containing a list of PDB files to process')
+    parser.add_argument('--mapping_file', type=str, help='CSV file mapping FASTA IDs to PDB files')
     args = parser.parse_args()
 
     with open(args.model_config) as json_file:
@@ -40,6 +41,8 @@ if __name__ == "__main__":
 
         if args.seq is not None and args.pdb_fn is not None:
             predictor.predict_from_pdb_and_seq(args.pdb_fn, args.seq)
+        elif args.fasta_fn is not None and args.mapping_file is not None:
+            predictor.predict_from_fasta_mapping(args.fasta_fn, args.mapping_file, pdb_dir=args.pdb_dir)
         elif args.seq is not None:
             predictor.predict(args.seq)
         elif args.cmap is not None:

@@ -8,6 +8,7 @@ import secrets
 import numpy as np
 import tensorflow as tf
 
+from Bio import pairwise2
 from .utils import load_catalogue, load_FASTA, load_predicted_PDB, seq2onehot
 from .layers import MultiGraphConv, GraphConv, FuncPredictor, SumPooling
 
@@ -205,6 +206,101 @@ class Predictor(object):
                     self.goidx2chains[idx] = set()
                 self.goidx2chains[idx].add(chain)
                 self.prot2goterms[chain].append((self.goterms[idx], self.gonames[idx], float(y[idx])))
+
+    def predict_from_fasta_mapping(self, fasta_fn, mapping_fn, pdb_dir=None, cmap_thresh=10.0):
+        print("### Computing predictions from FASTA and mapping file...")
+        # 1. Load FASTA sequences
+        fasta_ids, fasta_seqs = load_FASTA(fasta_fn)
+        fasta_dict = {fid.split()[0]: seq for fid, seq in zip(fasta_ids, fasta_seqs)}
+
+        # 2. Load mapping
+        mapping = {}
+        with open(mapping_fn, 'r') as csvfile:
+            reader = csv.reader(csvfile)
+            for row in reader:
+                fid = os.path.splitext(row[0].strip())[0]
+                #Check if fasta id exists in the fasta dict
+                if fid not in fasta_dict:
+                    print(f"FASTA ID {fid} not found in {fasta_fn}!")
+                    continue
+                pdb_file = row[1].strip()
+
+                if not pdb_file.lower().endswith('.pdb') and not pdb_file.lower().endswith('.pdb.gz'):
+                    pdb_file += '.pdb'
+
+                if not os.path.isabs(pdb_file) and pdb_dir is not None:
+                    pdb_file = os.path.join(pdb_dir, pdb_file)
+
+                mapping.setdefault(pdb_file, []).append(fid)
+
+        self.prot2goterms = {}
+        self.data = {}
+        self.goidx2chains = {}
+        predictions = {}
+
+        # 3. Process PDB files
+        for pdb_fn, fasta_id_list in mapping.items():
+            try:
+                A, S_pdb, pdb_seq = self._load_cmap(pdb_fn, cmap_thresh=cmap_thresh)
+            except Exception as e:
+                print(f"Error processing file {pdb_fn}: {e}")
+                continue
+        
+        # 4. Map fasta to pdb file
+        print(f"Processing PDB file: {pdb_fn} for {len(fasta_id_list)} sequences")
+        for fid in fasta_id_list:
+            fasta_seq = fasta_dict.get(fid)
+            if not fasta_seq:
+                print(f"FASTA ID {fid} not found in {fasta_fn}!")
+                continue
+
+            # 5. Align sequences
+            alignments = pairwise2.align.globalxx(fasta_seq, pdb_seq)
+            if not alignments:
+                print(f"Failed to align sequences for {fid} in {pdb_fn}")
+                continue
+            best = alignments[0]
+            aligned_fasta, aligned_pdb, score, start, end = best
+
+            # 6. Determine position in the fasta sequence that align with pdb sequence
+            fasta_indices = []
+            pdb_indices = []
+            i, j = 0, 0
+            for a_f, a_p in zip(aligned_fasta, aligned_pdb):
+                if a_f != '-' and a_p != '-':
+                    fasta_indices.append(i)
+                    pdb_indices.append(j)
+                if a_f != '-':
+                    i += 1
+                if a_p != '-':
+                    j += 1
+
+            # 7. Produce trimmed inputs
+            S_fasta = seq2onehot(fasta_seq)
+            S_trimmed = S_fasta[fasta_indices, :]
+            A_contact = A[0]
+            A_trimmed = A_contact[np.ix_(pdb_indices, pdb_indices)]
+
+            # Reshape
+            S_trimmed = S_trimmed.reshape(1, *S_trimmed.shape)
+            A_trimmed = A_trimmed.reshape(1, *A_trimmed.shape)
+
+            # 8. Run model prediction
+            y = self.model([A_trimmed, S_trimmed], training=False).numpy()[:, :, 0].reshape(-1)
+
+            # 9. Store results
+            predictions[fid] = y
+            self.prot2goterms[fid] = []
+            go_idx = np.where(y >= self.thresh)[0]
+            for idx in go_idx:
+                if idx not in self.goidx2chains:
+                    self.goidx2chains[idx] = set()
+                self.goidx2chains[idx].add(fid)
+                self.prot2goterms[fid].append((self.goterms[idx], self.gonames[idx], float(y[idx])))
+            self.data[fid] = [[A_trimmed, S_trimmed], fasta_seq]
+            
+        self.test_prot_list = list(predictions.keys())
+        self.Y_hat = np.array([predictions[fid] for fid in self.test_prot_list])
 
     def predict_from_catalogue(self, catalogue_fn, cmap_thresh=10.0):
         print ("### Computing predictions from catalogue...")
