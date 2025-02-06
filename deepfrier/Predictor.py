@@ -88,6 +88,7 @@ class Predictor(object):
             A = np.double(D < cmap_thresh)
             os.remove(rnd_fn)
         else:
+            print(filename)
             raise ValueError("File must be given in *.npz or *.pdb format.")
         # ##
         S = seq2onehot(seq)
@@ -154,12 +155,32 @@ class Predictor(object):
 
     def predict_from_PDB_dir(self, dir_name, file_list=None, cmap_thresh=10.0):
         print("### Computing predictions from directory with PDB files...")
-        if file_list:
-            # If a file_list is provided, use those files
-            pdb_fn_list = [os.path.join(dir_name, file) for file in file_list]
+        if file_list is not None:
+            if not os.path.isfile(file_list):
+                raise ValueError(f"File list {file_list} not found.")
+            with open(file_list, 'r') as f:
+                # Skip empty lines and strip whitespace
+                file_entries = [line.strip() for line in f if line.strip()]
+            provided_count = len(file_entries)
+
+            # Entries can be both absolute and relative paths
+            pdb_fn_list = [
+            entry if os.path.isabs(entry) or entry.startswith(dir_name)
+            else os.path.join(dir_name, entry) for entry in file_entries]
+
+            pdb_fn_list = [fn for fn in pdb_fn_list if os.path.exists(fn)]
+            found_count = len(pdb_fn_list)
+            print("Starting prediction on {} PDB files ({} out of {})"
+                .format(found_count, found_count, provided_count))
         else:
-            # Otherwise, use all PDB files in the directory
-            pdb_fn_list = glob.glob(dir_name + '/*.pdb*')
+            pdb_fn_list = glob.glob(os.path.join(dir_name, '*.pdb*'))
+            found_count = len(pdb_fn_list)
+            print("Starting prediction on {} PDB files for {} ontology."
+                .format(found_count, self.ontology))
+        
+        if not pdb_fn_list:
+            print("No valid PDB files found to process.")
+            return
 
         self.chain2path = {pdb_fn.split('/')[-1].split('.')[0]: pdb_fn for pdb_fn in pdb_fn_list}
         self.test_prot_list = list(self.chain2path.keys())
@@ -167,13 +188,18 @@ class Predictor(object):
         self.goidx2chains = {}
         self.prot2goterms = {}
         self.data = {}
+
         for i, chain in enumerate(self.test_prot_list):
-            A, S, seqres = self._load_cmap(self.chain2path[chain], cmap_thresh=cmap_thresh)
+            try:
+                A, S, seqres = self._load_cmap(self.chain2path[chain], cmap_thresh=cmap_thresh)
+            except Exception as e:
+                print(f"Error processing file {self.chain2path[chain]}: {e}")
+                continue 
             y = self.model([A, S], training=False).numpy()[:, :, 0].reshape(-1)
             self.Y_hat[i] = y
             self.prot2goterms[chain] = []
             self.data[chain] = [[A, S], seqres]
-            go_idx = np.where((y >= self.thresh) == True)[0]
+            go_idx = np.where(y >= self.thresh)[0]
             for idx in go_idx:
                 if idx not in self.goidx2chains:
                     self.goidx2chains[idx] = set()

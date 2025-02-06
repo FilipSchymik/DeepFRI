@@ -18,6 +18,7 @@ if __name__ == "__main__":
     parser.add_argument('-v', '--verbose', help="Prints predictions.", action="store_true")
     parser.add_argument('--use_guided_grads', help="Use guided grads to compute gradCAM.", action="store_true")
     parser.add_argument('--saliency', help="Compute saliency maps for every protein and every MF-GO term/EC number.", action="store_true")
+    # New argument to supply a list of files to process (one file name per line) -Filip
     parser.add_argument('--file_list', type=str, help='File containing a list of PDB files to process')
     args = parser.parse_args()
 
